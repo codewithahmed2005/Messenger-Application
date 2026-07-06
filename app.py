@@ -274,6 +274,6 @@ if __name__ == '__main__':
     print("Initializing Database...")
     init_db()
     print("Database ready. Starting Server...")
-    # Render ko port environment variable se leta hai, default 5000 rakha gaya hai
     port = int(os.environ.get('PORT', 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=False)
+    # Yahan allow_unsafe_werkzeug=True add karein
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
