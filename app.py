@@ -12,13 +12,16 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from dotenv import load_dotenv # .env file read karne ke liye
+
+# .env file ko load karega
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'super_secret_messenger_key_change_in_prod'
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'super_secret_messenger_key_change_in_prod')
 
-# YEH LINE CORS KO FIX KARNE KE LIYE HAI
+# CORS setup taaki Vercel aur Render aapas mein baat kar sakein
 CORS(app, resources={r"/*": {"origins": "*"}}) 
-
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # --- Database Configuration ---
@@ -27,40 +30,16 @@ DB_NAME = "messenger.db"
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;") # Improves concurrent read/write performance
+    conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
 def init_db():
     """Automated table-initialization block. Creates tables on startup if they don't exist."""
     with get_db_connection() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT UNIQUE,
-                username TEXT
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id TEXT,
-                sender TEXT,
-                text_encrypted TEXT,
-                timestamp TEXT
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS otps (
-                email TEXT PRIMARY KEY,
-                otp_hash TEXT,
-                username TEXT,
-                expires_at DATETIME
-            )
-        ''')
-        conn.execute('''
-            CREATE INDEX IF NOT EXISTS idx_chat_id_timestamp 
-            ON messages (chat_id, timestamp)
-        ''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE, username TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id TEXT, sender TEXT, text_encrypted TEXT, timestamp TEXT)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS otps (email TEXT PRIMARY KEY, otp_hash TEXT, username TEXT, expires_at DATETIME)''')
+        conn.execute('''CREATE INDEX IF NOT EXISTS idx_chat_id_timestamp ON messages (chat_id, timestamp)''')
         conn.commit()
 
 # --- Encryption Setup (Encryption at Rest) ---
@@ -77,11 +56,9 @@ cipher_suite = Fernet(ENCRYPTION_KEY)
 connected_users = {} 
 
 # --- Email Configuration ---
-# ⚠️ RENDER DEPLOYMENT KE LIYE ZAROORI ⚠️
-# Render ke Environment Variables mein SENDER_EMAIL aur SENDER_PASSWORD set karein.
-# Local testing ke liye yahan direct values daal sakte hain.
-SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "codewithahmed2005@gmail.com")
-SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "bfsa xqhu blzg nczb")
+# Ab yahan direct password nahi hai, yeh .env ya Render Environment se aayega
+SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "")
+SENDER_PASSWORD = os.environ.get("SENDER_PASSWORD", "")
 
 def send_otp_email(recipient_email, otp_code):
     """Sends OTP using Python's built-in smtplib over SSL."""
@@ -110,7 +87,6 @@ def get_chat_id(user1, user2):
 # --- Routes ---
 @app.route('/')
 def index():
-    # Render par health check ke liye simple response
     return jsonify({"status": "success", "message": "Messenger Backend is Live!"}), 200
 
 @app.route('/send_otp', methods=['POST'])
@@ -138,14 +114,16 @@ def request_otp():
             ''', (email, otp_hash, username, expires_at))
             conn.commit()
         
-            if send_otp_email(email, otp_code):
-                    print(f"\n✅ OTP sent to {email}: {otp_code}\n")
-                    return jsonify({'success': True, 'message': 'OTP sent successfully! Check your email.'})
-            else:
-                # YEH FIX ADD KIYA HAI: Agar email fail ho jaye, toh bhi frontend ko success bhej do 
-            # aur OTP terminal par print kar do taaki testing ho sake.
-                print(f"\n🔥 TESTING MODE: Email failed, but OTP for {email} is ->  {otp_code}  🔥\n")
-            return jsonify({'success': True, 'message': 'OTP sent successfully! (Check terminal for OTP)'})
+        # Database ke bahar email send karne ki koshish
+        if send_otp_email(email, otp_code):
+            print(f"\n✅ OTP sent to {email}: {otp_code}\n")
+            return jsonify({'success': True, 'message': 'OTP sent successfully! Check your email.'})
+        else:
+            # Agar email fail ho jaye (jaise Render free tier mein), toh bhi frontend ko success bhej do 
+            # aur OTP terminal/Render logs par print kar do taaki testing ho sake.
+            print(f"\n🔥 TESTING MODE: Email failed, but OTP for {email} is ->  {otp_code}  🔥\n")
+            return jsonify({'success': True, 'message': 'OTP sent successfully! (Check server logs for OTP)'})
+            
     except Exception as e:
         print(f"Error in /send_otp: {e}")
         return jsonify({'success': False, 'message': f'Server Error: {str(e)}'}), 500
@@ -191,8 +169,6 @@ def logout():
 # --- SocketIO Events ---
 @socketio.on('connect')
 def handle_connect():
-    # Note: Decoupled architecture mein cookies cross-origin restrict hote hain.
-    # Isliye hum session ko enforce karne ke bajaye, sidha frontend se bheje gaye data par rely karenge.
     pass 
 
 @socketio.on('disconnect')
@@ -202,7 +178,6 @@ def handle_disconnect():
         leave_room(username)
         emit('user_list', {'users': list(connected_users.values())}, broadcast=True)
 
-# Frontend se user register karne ka naya event (kyunki cookies cross-domain nahi aayenge)
 @socketio.on('register_user')
 def handle_register_user(data):
     username = data.get('username')
@@ -215,7 +190,7 @@ def handle_register_user(data):
 @socketio.on('fetch_history')
 def handle_fetch_history(data):
     peer = data.get('peer')
-    current_user = connected_users.get(request.sid) # Ab session ki jagah memory se read karenge
+    current_user = connected_users.get(request.sid)
     if not current_user or not peer: return
 
     chat_id = get_chat_id(current_user, peer)
@@ -275,5 +250,4 @@ if __name__ == '__main__':
     init_db()
     print("Database ready. Starting Server...")
     port = int(os.environ.get('PORT', 5000))
-    # Yahan allow_unsafe_werkzeug=True add karein
     socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
